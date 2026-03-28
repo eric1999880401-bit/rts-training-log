@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>RTS Training Log</title>
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#0a0a0f" />
+<link rel="manifest" href="manifest.json" />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { background:#0a0a0f; overflow-x:hidden; }
+  input, select, button { font-family: inherit; }
+  select { -webkit-appearance:none; appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238888a8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 8px center; padding-right:24px !important; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback, Fragment } = React;
+
+// ─── LocalStorage helper (replaces window.storage for standalone) ───
+const storage = {
+  get: (key) => { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; },
+  set: (key, value) => { localStorage.setItem(key, JSON.stringify(value)); },
+};
+
+// ─── RTS RPE % Table (Mike Tuchscherer) ───
+const RPE_TABLE = {
+  10:   [1.000,0.955,0.922,0.892,0.863,0.837,0.811,0.786,0.762,0.739],
+  9.5:  [0.978,0.939,0.907,0.878,0.850,0.824,0.799,0.774,0.751,0.723],
+  9:    [0.955,0.922,0.892,0.863,0.837,0.811,0.786,0.762,0.739,0.707],
+  8.5:  [0.939,0.907,0.878,0.850,0.824,0.799,0.774,0.751,0.723,0.694],
+  8:    [0.922,0.892,0.863,0.837,0.811,0.786,0.762,0.739,0.707,0.680],
+  7.5:  [0.907,0.878,0.850,0.824,0.799,0.774,0.751,0.723,0.694,0.667],
+  7:    [0.892,0.863,0.837,0.811,0.786,0.762,0.739,0.707,0.680,0.653],
+  6.5:  [0.878,0.850,0.824,0.799,0.774,0.751,0.723,0.694,0.667,0.640],
+  6:    [0.863,0.837,0.811,0.786,0.762,0.739,0.707,0.680,0.653,0.626],
+  5.5:  [0.848,0.822,0.797,0.772,0.748,0.725,0.693,0.666,0.640,0.613],
+  5:    [0.834,0.808,0.783,0.758,0.735,0.711,0.680,0.653,0.626,0.599],
+};
+
+const getRpePercentage = (rpe, reps) => {
+  const r = Math.min(Math.max(rpe, 5), 10);
+  const key = Math.round(r * 2) / 2;
+  const row = RPE_TABLE[key];
+  if (!row) return null;
+  const idx = Math.min(Math.max(reps - 1, 0), 9);
+  return row[idx];
+};
+
+const calcE1RM = (weight, reps, rpe) => {
+  const pct = getRpePercentage(rpe, reps);
+  if (!pct || pct === 0 || !weight) return null;
+  return weight / pct;
+};
+
+const calcSuggestedWeight = (e1rm, targetReps, targetRpe, increment) => {
+  const pct = getRpePercentage(targetRpe, targetReps);
+  if (!pct || !e1rm) return null;
+  const raw = e1rm * pct;
+  return Math.round(raw / increment) * increment;
+};
+
+// ─── Constants ───
+const LIFTS = ["Squat", "Bench", "Deadlift"];
+const VARIATIONS = ["Competition", "Paused", "Close-Grip", "Board", "Pin", "Spoto", "Box", "Tempo", "Larsen", "2ct Pause", "Other"];
+const SET_TYPES = ["Warm Up", "Top", "Back Off", "Down Set", "AMRAP"];
+const REPS_OPTIONS = [1,2,3,4,5,6,7,8,9,10];
+const RPE_OPTIONS = [];
+for (let i = 5; i <= 10; i += 0.5) RPE_OPTIONS.push(i);
+
+const DEFAULT_SETTINGS = {
+  squat_increment: 2.5, bench_increment: 1, deadlift_increment: 2.5,
+  squat_fatigue: 5, bench_fatigue: 5, deadlift_fatigue: 6,
+  squat_pr: 165, bench_pr: 95, deadlift_pr: 215,
+};
+
+const getIncrement = (lift, settings) => {
+  if (lift === "Squat") return settings.squat_increment;
+  if (lift === "Bench") return settings.bench_increment;
+  return settings.deadlift_increment;
+};
+const getFatigue = (lift, settings) => {
+  if (lift === "Squat") return settings.squat_fatigue;
+  if (lift === "Bench") return settings.bench_fatigue;
+  return settings.deadlift_fatigue;
+};
+
+const C = {
+  bg: "#0a0a0f", card: "#13131a", cardHover: "#1a1a24",
+  border: "#23233a", borderLight: "#2d2d4a",
+  accent: "#e63946", accentDim: "#c5303c", accentGlow: "rgba(230,57,70,0.15)",
+  green: "#2ecc71", greenDim: "rgba(46,204,113,0.15)",
+  yellow: "#f1c40f", yellowDim: "rgba(241,196,15,0.15)",
+  red: "#e74c3c", redDim: "rgba(231,76,60,0.15)",
+  text: "#e8e8f0", textDim: "#8888a8", textMuted: "#55556a",
+  white: "#ffffff",
+};
+
+// ─── Components ───
+function Select({ label, value, onChange, options, style }) {
+  return (
+    <div style={{ flex: 1, minWidth: 0, ...style }}>
+      <div style={{ fontSize: 10, color: C.textDim, marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px", fontFamily: "'JetBrains Mono', monospace" }}>{label}</div>
+      <select value={value} onChange={e => onChange(e.target.value)} style={{
+        width: "100%", padding: "10px 8px", borderRadius: 8, border: "1px solid " + C.border,
+        background: C.card, color: C.text, fontSize: 14, fontFamily: "'DM Sans', sans-serif",
+        outline: "none", cursor: "pointer",
+      }}>
+        {options.map(o => {
+          const val = typeof o === "object" ? o.value : o;
+          const lbl = typeof o === "object" ? o.label : o;
+          return <option key={val} value={val}>{lbl}</option>;
+        })}
+      </select>
+    </div>
+  );
+}
+
+function NumberInput({ label, value, onChange, placeholder, step, style }) {
+  return (
+    <div style={{ flex: 1, minWidth: 0, ...style }}>
+      <div style={{ fontSize: 10, color: C.textDim, marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px", fontFamily: "'JetBrains Mono', monospace" }}>{label}</div>
+      <input type="number" inputMode="decimal" step={step || "any"} value={value} onChange={e => onChange(e.target.value)}
+        placeholder={placeholder} style={{
+          width: "100%", padding: "10px 8px", borderRadius: 8, border: "1px solid " + C.border,
+          background: C.card, color: C.text, fontSize: 14, fontFamily: "'JetBrains Mono', monospace",
+          outline: "none", boxSizing: "border-box",
+        }}
+      />
+    </div>
+  );
+}
+
+function SectionLabel({ children }) {
+  return (
+    <div style={{
+      fontSize: 11, color: C.textDim, fontFamily: "'JetBrains Mono', monospace",
+      fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.8px",
+      marginBottom: 8, marginTop: 4,
+    }}>{children}</div>
+  );
+}
+
+function SetCard({ set: s, compact }) {
+  return (
+    <div style={{
+      background: C.card, border: "1px solid " + C.border, borderRadius: 10,
+      padding: compact ? "10px 12px" : "12px 14px", marginBottom: 8,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{s.lift}</span>
+            <span style={{
+              fontSize: 10, padding: "2px 6px", borderRadius: 4,
+              background: C.accentGlow, color: C.accent, fontWeight: 600,
+              fontFamily: "'JetBrains Mono', monospace",
+            }}>{s.variation}</span>
+            <span style={{
+              fontSize: 10, padding: "2px 6px", borderRadius: 4,
+              background: s.setType === "Top" ? C.yellowDim : s.setType === "Back Off" ? C.greenDim : C.border,
+              color: s.setType === "Top" ? C.yellow : s.setType === "Back Off" ? C.green : C.textDim,
+              fontWeight: 600, fontFamily: "'JetBrains Mono', monospace",
+            }}>{s.setType}</span>
+          </div>
+          {!compact && (
+            <div style={{ fontSize: 11, color: C.textDim, marginTop: 4, fontFamily: "'JetBrains Mono', monospace" }}>
+              {s.date} • W{s.week}D{s.day}
+            </div>
+          )}
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 15 }}>
+            {s.weight}<span style={{ fontSize: 11, color: C.textDim }}>kg</span> × {s.reps}
+          </div>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: C.textDim }}>
+            RPE {s.rpe} {s.e1rm ? "• e1RM " + Math.round(s.e1rm) : ""}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Log Page ───
+function LogPage({ addSet, settings, sets }) {
+  const today = new Date().toISOString().split("T")[0];
+  const [date, setDate] = useState(today);
+  const [week, setWeek] = useState("1");
+  const [day, setDay] = useState("1");
+  const [lift, setLift] = useState("Squat");
+  const [variation, setVariation] = useState("Competition");
+  const [setType, setSetType] = useState("Top");
+  const [reps, setReps] = useState("1");
+  const [weight, setWeight] = useState("");
+  const [rpe, setRpe] = useState("7");
+  const [targetReps, setTargetReps] = useState("5");
+  const [targetRpe, setTargetRpe] = useState("6");
+  const [showCalc, setShowCalc] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const increment = getIncrement(lift, settings);
+  const fatiguePct = getFatigue(lift, settings);
+  const w = parseFloat(weight);
+  const r = parseInt(reps);
+  const rpeVal = parseFloat(rpe);
+
+  const e1rm = (w && r && rpeVal) ? calcE1RM(w, r, rpeVal) : null;
+  const suggestedBackoff = e1rm ? calcSuggestedWeight(e1rm, parseInt(targetReps), parseFloat(targetRpe), increment) : null;
+
+  const todayTopE1RMs = useMemo(() => {
+    return sets.filter(s => s.date === date && s.lift === lift && s.setType === "Top" && s.e1rm)
+      .map(s => s.e1rm);
+  }, [sets, date, lift]);
+  const bestTopE1RM = todayTopE1RMs.length > 0 ? Math.max(...todayTopE1RMs) : null;
+  const fatigueDropReached = (bestTopE1RM && e1rm) ? ((bestTopE1RM - e1rm) / bestTopE1RM * 100) >= fatiguePct : false;
+  const currentFatigueDrop = (bestTopE1RM && e1rm && bestTopE1RM > 0) ? ((bestTopE1RM - e1rm) / bestTopE1RM * 100) : null;
+
+  const handleSave = () => {
+    if (!w || !r || !rpeVal) return;
+    const entry = {
+      id: Date.now(), date, week: parseInt(week), day: parseInt(day), lift, variation,
+      setType, reps: r, weight: w, rpe: rpeVal, e1rm: e1rm ? Math.round(e1rm * 10) / 10 : null,
+    };
+    addSet(entry);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1500);
+    setWeight("");
+  };
+
+  return (
+    <div style={{ padding: "16px 16px 20px" }}>
+      <SectionLabel>Session Info</SectionLabel>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <div style={{ flex: 1.4 }}>
+          <div style={{ fontSize: 10, color: C.textDim, marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px", fontFamily: "'JetBrains Mono', monospace" }}>Date</div>
+          <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{
+            width: "100%", padding: "10px 8px", borderRadius: 8, border: "1px solid " + C.border,
+            background: C.card, color: C.text, fontSize: 13, fontFamily: "'JetBrains Mono', monospace",
+            outline: "none", boxSizing: "border-box",
+          }} />
+        </div>
+        <Select label="Week" value={week} onChange={setWeek} options={Array.from({length:12},(_,i)=>({value:String(i+1),label:"W"+(i+1)}))} />
+        <Select label="Day" value={day} onChange={setDay} options={[{value:"1",label:"D1"},{value:"2",label:"D2"},{value:"3",label:"D3"}]} />
+      </div>
+
+      <SectionLabel>Exercise</SectionLabel>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <Select label="Lift" value={lift} onChange={setLift} options={LIFTS} />
+        <Select label="Variation" value={variation} onChange={setVariation} options={VARIATIONS} />
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <Select label="Set Type" value={setType} onChange={setSetType} options={SET_TYPES} />
+      </div>
+
+      <SectionLabel>Performance</SectionLabel>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <Select label="Reps" value={reps} onChange={setReps} options={REPS_OPTIONS.map(r=>({value:String(r),label:String(r)}))} />
+        <NumberInput label="Weight (kg)" value={weight} onChange={setWeight} placeholder="0" step={0.5} />
+        <Select label="RPE" value={rpe} onChange={setRpe} options={RPE_OPTIONS.map(r=>({value:String(r),label:String(r)}))} />
+      </div>
+
+      {e1rm && (
+        <div style={{
+          background: "linear-gradient(135deg, " + C.card + ", " + C.cardHover + ")",
+          border: "1px solid " + C.borderLight, borderRadius: 12, padding: "14px 16px", marginBottom: 12,
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 10, color: C.textDim, fontFamily: "'JetBrains Mono', monospace", textTransform: "uppercase", fontWeight: 600, marginBottom: 2 }}>Estimated 1RM</div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: C.accent, fontFamily: "'JetBrains Mono', monospace" }}>
+                {Math.round(e1rm * 10) / 10}<span style={{ fontSize: 14, color: C.textDim, marginLeft: 4 }}>kg</span>
+              </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 10, color: C.textDim, fontFamily: "'JetBrains Mono', monospace", textTransform: "uppercase", fontWeight: 600, marginBottom: 2 }}>%1RM</div>
+              <div style={{ fontSize: 20, fontWeight: 600, color: C.text, fontFamily: "'JetBrains Mono', monospace" }}>
+                {(getRpePercentage(rpeVal, r) * 100).toFixed(1)}%
+              </div>
+            </div>
+          </div>
+
+          {bestTopE1RM && setType === "Back Off" && currentFatigueDrop !== null && (
+            <div style={{
+              marginTop: 12, padding: "10px 12px", borderRadius: 8,
+              background: fatigueDropReached ? C.redDim : C.greenDim,
+              border: "1px solid " + (fatigueDropReached ? C.red : C.green) + "33",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, color: fatigueDropReached ? C.red : C.green }}>
+                  {fatigueDropReached ? "⚠ FATIGUE DROP REACHED" : "✓ WITHIN FATIGUE LIMIT"}
+                </div>
+                <div style={{ fontSize: 13, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: fatigueDropReached ? C.red : C.green }}>
+                  {currentFatigueDrop.toFixed(1)}% / {fatiguePct}%
+                </div>
+              </div>
+              <div style={{ marginTop: 6, height: 4, borderRadius: 2, background: C.border }}>
+                <div style={{
+                  height: "100%", borderRadius: 2, transition: "width 0.3s",
+                  width: Math.min(currentFatigueDrop / fatiguePct * 100, 100) + "%",
+                  background: fatigueDropReached ? C.red : C.green,
+                }} />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <button onClick={() => setShowCalc(!showCalc)} style={{
+        width: "100%", padding: "10px", borderRadius: 8, border: "1px solid " + C.border,
+        background: showCalc ? C.accentGlow : C.card, color: showCalc ? C.accent : C.textDim,
+        fontSize: 12, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, cursor: "pointer",
+        marginBottom: 12, textTransform: "uppercase", letterSpacing: "0.5px",
+      }}>
+        {showCalc ? "▾ Hide" : "▸ Show"} Back-Off Calculator
+      </button>
+
+      {showCalc && e1rm && (
+        <div style={{
+          background: C.card, border: "1px solid " + C.border, borderRadius: 12,
+          padding: "14px 16px", marginBottom: 12,
+        }}>
+          <div style={{ fontSize: 11, color: C.textDim, marginBottom: 10, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, textTransform: "uppercase" }}>
+            Suggested Back-Off Weight
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <Select label="Target Reps" value={targetReps} onChange={setTargetReps} options={REPS_OPTIONS.map(r=>({value:String(r),label:String(r)}))} />
+            <Select label="Target RPE" value={targetRpe} onChange={setTargetRpe} options={RPE_OPTIONS.map(r=>({value:String(r),label:String(r)}))} />
+          </div>
+          {suggestedBackoff && (
+            <div style={{
+              textAlign: "center", padding: "12px", borderRadius: 8,
+              background: "linear-gradient(135deg, " + C.accentGlow + ", transparent)",
+              border: "1px solid " + C.accent + "33",
+            }}>
+              <div style={{ fontSize: 10, color: C.textDim, fontFamily: "'JetBrains Mono', monospace", marginBottom: 4, textTransform: "uppercase", fontWeight: 600 }}>Use this weight</div>
+              <div style={{ fontSize: 32, fontWeight: 700, color: C.accent, fontFamily: "'JetBrains Mono', monospace" }}>
+                {suggestedBackoff}<span style={{ fontSize: 16, color: C.textDim, marginLeft: 4 }}>kg</span>
+              </div>
+              <div style={{ fontSize: 11, color: C.textDim, fontFamily: "'JetBrains Mono', monospace", marginTop: 4 }}>
+                {parseInt(targetReps)} reps @ RPE {parseFloat(targetRpe)} • rounded to {increment}kg
+              </div>
+            </div>
+          )}
+
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 10, color: C.textDim, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 6, textTransform: "uppercase" }}>Quick Reference</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 4 }}>
+              {[
+                { r: 3, rpe: 7, label: "3@7" }, { r: 4, rpe: 7, label: "4@7" }, { r: 5, rpe: 7, label: "5@7" },
+                { r: 3, rpe: 6.5, label: "3@6.5" }, { r: 4, rpe: 6.5, label: "4@6.5" }, { r: 5, rpe: 6.5, label: "5@6.5" },
+                { r: 3, rpe: 6, label: "3@6" }, { r: 4, rpe: 6, label: "4@6" }, { r: 5, rpe: 6, label: "5@6" },
+              ].map(({ r: tr, rpe: trpe, label }) => {
+                const sw = calcSuggestedWeight(e1rm, tr, trpe, increment);
+                return (
+                  <div key={label} style={{
+                    padding: "6px 4px", borderRadius: 6, background: C.bg,
+                    border: "1px solid " + C.border, textAlign: "center",
+                  }}>
+                    <div style={{ fontSize: 10, color: C.textDim, fontFamily: "'JetBrains Mono', monospace" }}>{label}</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: C.text, fontFamily: "'JetBrains Mono', monospace" }}>{sw || "—"}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <button onClick={handleSave} disabled={!w || !r || !rpeVal} style={{
+        width: "100%", padding: "14px", borderRadius: 10, border: "none",
+        background: (!w || !r || !rpeVal) ? C.border : saved ? C.green : C.accent,
+        color: C.white, fontSize: 15, fontWeight: 700, cursor: (!w || !r || !rpeVal) ? "not-allowed" : "pointer",
+        fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.3px",
+        transition: "background 0.2s",
+        boxShadow: (!w || !r || !rpeVal) ? "none" : "0 4px 20px " + C.accentGlow,
+      }}>
+        {saved ? "✓ Saved!" : "Save Set"}
+      </button>
+
+      {sets.filter(s => s.date === date).length > 0 && (
+        <div style={{ marginTop: 20 }}>
+          <SectionLabel>Today's Sets</SectionLabel>
+          {sets.filter(s => s.date === date).map((s) => (
+            <SetCard key={s.id} set={s} compact />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── History Page ───
+function HistoryPage({ sets, deleteSet, settings }) {
+  const [filterLift, setFilterLift] = useState("All");
+  const [filterWeek, setFilterWeek] = useState("All");
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const filtered = sets.filter(s => {
+    if (filterLift !== "All" && s.lift !== filterLift) return false;
+    if (filterWeek !== "All" && String(s.week) !== filterWeek) return false;
+    return true;
+  });
+
+  const bestE1RMs = useMemo(() => {
+    const bests = {};
+    for (const s of sets) {
+      if (s.e1rm && (!bests[s.lift] || s.e1rm > bests[s.lift])) bests[s.lift] = s.e1rm;
+    }
+    return bests;
+  }, [sets]);
+
+  return (
+    <div style={{ padding: "16px" }}>
+      {Object.keys(bestE1RMs).length > 0 && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          {LIFTS.map(l => (
+            <div key={l} style={{
+              flex: 1, padding: "10px 8px", borderRadius: 10, textAlign: "center",
+              background: C.card, border: "1px solid " + C.border,
+            }}>
+              <div style={{ fontSize: 10, color: C.textDim, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, textTransform: "uppercase" }}>{l.slice(0,2)}</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: bestE1RMs[l] ? C.accent : C.textMuted, fontFamily: "'JetBrains Mono', monospace", marginTop: 2 }}>
+                {bestE1RMs[l] ? Math.round(bestE1RMs[l] * 10) / 10 : "—"}
+              </div>
+              <div style={{ fontSize: 9, color: C.textDim, fontFamily: "'JetBrains Mono', monospace" }}>Best e1RM</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <Select label="Lift" value={filterLift} onChange={setFilterLift} options={["All", ...LIFTS]} />
+        <Select label="Week" value={filterWeek} onChange={setFilterWeek}
+          options={["All", ...Array.from({length:12},(_,i)=>({value:String(i+1),label:"W"+(i+1)}))]} />
+      </div>
+
+      {filtered.length === 0 ? (
+        <div style={{ textAlign: "center", padding: 40, color: C.textMuted }}>
+          <div style={{ fontSize: 28, marginBottom: 8 }}>∅</div>
+          <div style={{ fontSize: 13 }}>No sets recorded yet</div>
+        </div>
+      ) : (
+        filtered.map((s) => {
+          const realIdx = sets.indexOf(s);
+          return (
+            <div key={s.id} style={{ position: "relative" }}>
+              <SetCard set={s} />
+              {confirmDelete === s.id ? (
+                <div style={{ display: "flex", gap: 6, marginTop: -8, marginBottom: 8, justifyContent: "flex-end" }}>
+                  <button onClick={() => { deleteSet(realIdx); setConfirmDelete(null); }} style={{
+                    padding: "6px 14px", borderRadius: 6, border: "none",
+                    background: C.red, color: C.white, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                  }}>Delete</button>
+                  <button onClick={() => setConfirmDelete(null)} style={{
+                    padding: "6px 14px", borderRadius: 6, border: "1px solid " + C.border,
+                    background: C.card, color: C.textDim, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                  }}>Cancel</button>
+                </div>
+              ) : (
+                <button onClick={() => setConfirmDelete(s.id)} style={{
+                  position: "absolute", top: 10, right: 10, background: "none", border: "none",
+                  color: C.textMuted, cursor: "pointer", fontSize: 14, padding: 4,
+                }}>✕</button>
+              )}
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+// ─── Settings Page ───
+function SettingsPage({ settings, setSettings, setSets }) {
+  const update = (key, val) => setSettings(prev => ({ ...prev, [key]: parseFloat(val) || 0 }));
+  const [showConfirm, setShowConfirm] = useState(false);
+
+  return (
+    <div style={{ padding: "16px" }}>
+      <SectionLabel>Current PRs (kg)</SectionLabel>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <NumberInput label="Squat PR" value={settings.squat_pr} onChange={v => update("squat_pr", v)} />
+        <NumberInput label="Bench PR" value={settings.bench_pr} onChange={v => update("bench_pr", v)} />
+        <NumberInput label="Deadlift PR" value={settings.deadlift_pr} onChange={v => update("deadlift_pr", v)} />
+      </div>
+
+      <SectionLabel>Plate Increments (kg)</SectionLabel>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <NumberInput label="Squat" value={settings.squat_increment} onChange={v => update("squat_increment", v)} step={0.5} />
+        <NumberInput label="Bench" value={settings.bench_increment} onChange={v => update("bench_increment", v)} step={0.5} />
+        <NumberInput label="Deadlift" value={settings.deadlift_increment} onChange={v => update("deadlift_increment", v)} step={0.5} />
+      </div>
+
+      <SectionLabel>Fatigue Drop %</SectionLabel>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <NumberInput label="Squat %" value={settings.squat_fatigue} onChange={v => update("squat_fatigue", v)} step={1} />
+        <NumberInput label="Bench %" value={settings.bench_fatigue} onChange={v => update("bench_fatigue", v)} step={1} />
+        <NumberInput label="Deadlift %" value={settings.deadlift_fatigue} onChange={v => update("deadlift_fatigue", v)} step={1} />
+      </div>
+
+      <div style={{
+        padding: "14px 16px", borderRadius: 10, background: C.card, border: "1px solid " + C.border,
+        marginBottom: 12, fontSize: 12, color: C.textDim, lineHeight: 1.6,
+      }}>
+        <strong style={{ color: C.text }}>How Fatigue Drop works:</strong><br/>
+        After logging a Top set, back-off set e1RMs are compared to the session's best Top set e1RM. When the drop exceeds your fatigue % threshold, you'll see a warning to stop the lift.
+      </div>
+
+      <div style={{ marginTop: 24 }}>
+        {!showConfirm ? (
+          <button onClick={() => setShowConfirm(true)} style={{
+            width: "100%", padding: "12px", borderRadius: 8, border: "1px solid " + C.red + "44",
+            background: C.redDim, color: C.red, fontSize: 13, fontWeight: 600, cursor: "pointer",
+          }}>Clear All Training Data</button>
+        ) : (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => { setSets([]); setShowConfirm(false); }} style={{
+              flex: 1, padding: "12px", borderRadius: 8, border: "none",
+              background: C.red, color: C.white, fontSize: 13, fontWeight: 700, cursor: "pointer",
+            }}>Confirm Delete All</button>
+            <button onClick={() => setShowConfirm(false)} style={{
+              flex: 1, padding: "12px", borderRadius: 8, border: "1px solid " + C.border,
+              background: C.card, color: C.textDim, fontSize: 13, fontWeight: 600, cursor: "pointer",
+            }}>Cancel</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Reference Page ───
+function ReferencePage() {
+  const [refReps, setRefReps] = useState(5);
+  return (
+    <div style={{ padding: "16px" }}>
+      <SectionLabel>e1RM Formula</SectionLabel>
+      <div style={{
+        background: C.card, border: "1px solid " + C.border, borderRadius: 10,
+        padding: "14px 16px", marginBottom: 16, fontSize: 12, lineHeight: 1.7, color: C.textDim,
+      }}>
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", color: C.accent, fontSize: 14, marginBottom: 8 }}>
+          e1RM = Weight ÷ %1RM(reps, RPE)
+        </div>
+        <div>
+          This app uses the <strong style={{ color: C.text }}>RTS RPE percentage chart</strong> by Mike Tuchscherer (Reactive Training Systems). Each RPE/rep combination maps to a percentage of your 1RM.
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <strong style={{ color: C.text }}>Back-off calculation:</strong><br/>
+          Suggested Weight = e1RM × %1RM(target reps, target RPE), rounded to your plate increment.
+        </div>
+      </div>
+
+      <SectionLabel>RPE Chart (%1RM)</SectionLabel>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+        {[1,2,3,4,5,6,7,8].map(r => (
+          <button key={r} onClick={() => setRefReps(r)} style={{
+            padding: "6px 12px", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer",
+            fontFamily: "'JetBrains Mono', monospace",
+            border: refReps === r ? "1px solid " + C.accent : "1px solid " + C.border,
+            background: refReps === r ? C.accentGlow : C.card,
+            color: refReps === r ? C.accent : C.textDim,
+          }}>{r}rep</button>
+        ))}
+      </div>
+
+      <div style={{ background: C.card, border: "1px solid " + C.border, borderRadius: 10, overflow: "hidden" }}>
+        <div style={{
+          display: "grid", gridTemplateColumns: "60px 1fr", fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+        }}>
+          <div style={{ padding: "8px", background: C.border, fontWeight: 700, color: C.text, textAlign: "center" }}>RPE</div>
+          <div style={{ padding: "8px", background: C.border, fontWeight: 700, color: C.text, textAlign: "center" }}>%1RM ({refReps} rep{refReps > 1 ? "s" : ""})</div>
+          {RPE_OPTIONS.slice().reverse().map(rpe => {
+            const pct = getRpePercentage(rpe, refReps);
+            return (
+              <Fragment key={rpe}>
+                <div style={{ padding: "7px 8px", textAlign: "center", color: C.textDim, borderTop: "1px solid " + C.border }}>{rpe}</div>
+                <div style={{ padding: "7px 8px", textAlign: "center", color: C.text, fontWeight: 600, borderTop: "1px solid " + C.border }}>
+                  {pct ? (pct * 100).toFixed(1) + "%" : "—"}
+                </div>
+              </Fragment>
+            );
+          })}
+        </div>
+      </div>
+
+      <div style={{
+        marginTop: 16, padding: "12px 16px", borderRadius: 10,
+        background: C.card, border: "1px solid " + C.border,
+        fontSize: 11, color: C.textDim, lineHeight: 1.6,
+      }}>
+        <strong style={{ color: C.text }}>RPE Scale:</strong><br/>
+        10 = Max effort, 0 reps left<br/>
+        9 = Could do 1 more rep<br/>
+        8 = Could do 2 more reps<br/>
+        7 = Could do 3 more reps<br/>
+        6 = Could do 4 more reps<br/>
+        5 = Light effort, warm-up zone
+      </div>
+    </div>
+  );
+}
+
+// ─── Bottom Nav ───
+function NavBar({ page, setPage }) {
+  const tabs = [
+    { id: "log", icon: "＋", label: "Log" },
+    { id: "history", icon: "☰", label: "History" },
+    { id: "reference", icon: "◈", label: "RPE Chart" },
+    { id: "settings", icon: "⚙", label: "Settings" },
+  ];
+  return (
+    <div style={{
+      position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)",
+      width: "100%", maxWidth: 480, background: C.card,
+      borderTop: "1px solid " + C.border, display: "flex",
+      padding: "6px 0 env(safe-area-inset-bottom, 8px)", zIndex: 100,
+    }}>
+      {tabs.map(t => (
+        <button key={t.id} onClick={() => setPage(t.id)} style={{
+          flex: 1, background: "none", border: "none", padding: "8px 4px", cursor: "pointer",
+          display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+        }}>
+          <div style={{
+            fontSize: 18, color: page === t.id ? C.accent : C.textMuted,
+            transition: "color 0.15s",
+          }}>{t.icon}</div>
+          <div style={{
+            fontSize: 10, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace",
+            color: page === t.id ? C.accent : C.textMuted,
+            transition: "color 0.15s",
+          }}>{t.label}</div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ─── Main App ───
+function App() {
+  const [page, setPage] = useState("log");
+  const [sets, setSets] = useState([]);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    const savedSets = storage.get("rts-sets");
+    if (savedSets) setSets(savedSets);
+    const savedSettings = storage.get("rts-settings");
+    if (savedSettings) setSettings(savedSettings);
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    storage.set("rts-sets", sets);
+  }, [sets, loaded]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    storage.set("rts-settings", settings);
+  }, [settings, loaded]);
+
+  const addSet = (entry) => setSets(prev => [entry, ...prev]);
+  const deleteSet = (idx) => setSets(prev => prev.filter((_, i) => i !== idx));
+
+  if (!loaded) return (
+    <div style={{ background: C.bg, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ color: C.textDim, fontFamily: "'JetBrains Mono', monospace", fontSize: 14 }}>Loading...</div>
+    </div>
+  );
+
+  return (
+    <div style={{
+      background: C.bg, minHeight: "100vh", fontFamily: "'DM Sans', 'Helvetica Neue', sans-serif",
+      color: C.text, maxWidth: 480, margin: "0 auto", paddingBottom: 80,
+    }}>
+      <div style={{
+        padding: "20px 20px 12px", borderBottom: "1px solid " + C.border,
+        background: "linear-gradient(180deg, " + C.card + " 0%, " + C.bg + " 100%)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{
+            width: 32, height: 32, borderRadius: 8, background: C.accent,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14, color: C.white,
+          }}>RTS</div>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: "-0.3px" }}>Training Log</div>
+            <div style={{ fontSize: 11, color: C.textDim, fontFamily: "'JetBrains Mono', monospace" }}>RPE-BASED POWERLIFTING TRACKER</div>
+          </div>
+        </div>
+      </div>
+
+      {page === "log" && <LogPage addSet={addSet} settings={settings} sets={sets} />}
+      {page === "history" && <HistoryPage sets={sets} deleteSet={deleteSet} settings={settings} />}
+      {page === "settings" && <SettingsPage settings={settings} setSettings={setSettings} setSets={setSets} />}
+      {page === "reference" && <ReferencePage />}
+      <NavBar page={page} setPage={setPage} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

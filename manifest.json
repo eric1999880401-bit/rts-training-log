@@ -1,0 +1,16 @@
+{
+  "name": "RTS Training Log",
+  "short_name": "RTS Log",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0a0a0f",
+  "theme_color": "#0a0a0f",
+  "description": "RPE-based powerlifting training tracker with e1RM calculator",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='192' height='192'%3E%3Crect width='192' height='192' rx='40' fill='%23e63946'/%3E%3Ctext x='96' y='116' text-anchor='middle' fill='white' font-family='monospace' font-size='64' font-weight='bold'%3ERTS%3C/text%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    }
+  ]
+}
