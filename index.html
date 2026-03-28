@@ -22,6 +22,7 @@
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
 <script type="text/babel">
 const { useState, useEffect, useMemo, useCallback, Fragment } = React;
@@ -399,11 +400,72 @@ function LogPage({ addSet, settings, sets }) {
   );
 }
 
+// ─── Export to Excel ───
+function exportToExcel(data, filename) {
+  // Sort by date, week, day, then by set order
+  const sorted = [...data].sort((a, b) => {
+    if (a.date !== b.date) return a.date.localeCompare(b.date);
+    if (a.week !== b.week) return a.week - b.week;
+    if (a.day !== b.day) return a.day - b.day;
+    return a.id - b.id;
+  });
+
+  // Build Training Log sheet
+  const logRows = sorted.map(s => ({
+    "Date": s.date,
+    "Week": s.week,
+    "Day": s.day,
+    "Lift": s.lift,
+    "Variation": s.variation,
+    "Set Type": s.setType,
+    "Reps": s.reps,
+    "Weight (kg)": s.weight,
+    "RPE": s.rpe,
+    "%1RM": getRpePercentage(s.rpe, s.reps) ? +(getRpePercentage(s.rpe, s.reps) * 100).toFixed(1) : "",
+    "e1RM (kg)": s.e1rm ? +s.e1rm.toFixed(1) : "",
+  }));
+
+  // Build e1RM Summary sheet — best e1RM per lift per week
+  const weekLiftMap = {};
+  for (const s of sorted) {
+    const key = s.week + "|" + s.lift;
+    if (s.e1rm && (!weekLiftMap[key] || s.e1rm > weekLiftMap[key])) {
+      weekLiftMap[key] = s.e1rm;
+    }
+  }
+  const weeks = [...new Set(sorted.map(s => s.week))].sort((a, b) => a - b);
+  const summaryRows = weeks.map(w => ({
+    "Week": w,
+    "Best Squat e1RM": weekLiftMap[w + "|Squat"] ? +weekLiftMap[w + "|Squat"].toFixed(1) : "",
+    "Best Bench e1RM": weekLiftMap[w + "|Bench"] ? +weekLiftMap[w + "|Bench"].toFixed(1) : "",
+    "Best Deadlift e1RM": weekLiftMap[w + "|Deadlift"] ? +weekLiftMap[w + "|Deadlift"].toFixed(1) : "",
+  }));
+
+  const wb = XLSX.utils.book_new();
+
+  // Training Log sheet
+  const ws1 = XLSX.utils.json_to_sheet(logRows);
+  // Column widths
+  ws1["!cols"] = [
+    { wch: 12 }, { wch: 6 }, { wch: 5 }, { wch: 10 }, { wch: 14 },
+    { wch: 10 }, { wch: 5 }, { wch: 12 }, { wch: 5 }, { wch: 7 }, { wch: 11 },
+  ];
+  XLSX.utils.book_append_sheet(wb, ws1, "Training_Log");
+
+  // Summary sheet
+  const ws2 = XLSX.utils.json_to_sheet(summaryRows);
+  ws2["!cols"] = [{ wch: 6 }, { wch: 18 }, { wch: 18 }, { wch: 20 }];
+  XLSX.utils.book_append_sheet(wb, ws2, "e1RM_Summary");
+
+  XLSX.writeFile(wb, filename);
+}
+
 // ─── History Page ───
 function HistoryPage({ sets, deleteSet, settings }) {
   const [filterLift, setFilterLift] = useState("All");
   const [filterWeek, setFilterWeek] = useState("All");
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [exported, setExported] = useState(false);
 
   const filtered = sets.filter(s => {
     if (filterLift !== "All" && s.lift !== filterLift) return false;
@@ -418,6 +480,13 @@ function HistoryPage({ sets, deleteSet, settings }) {
     }
     return bests;
   }, [sets]);
+
+  const handleExport = () => {
+    const today = new Date().toISOString().split("T")[0];
+    exportToExcel(filtered, "RTS_Training_Log_" + today + ".xlsx");
+    setExported(true);
+    setTimeout(() => setExported(false), 2000);
+  };
 
   return (
     <div style={{ padding: "16px" }}>
@@ -450,31 +519,50 @@ function HistoryPage({ sets, deleteSet, settings }) {
           <div style={{ fontSize: 13 }}>No sets recorded yet</div>
         </div>
       ) : (
-        filtered.map((s) => {
-          const realIdx = sets.indexOf(s);
-          return (
-            <div key={s.id} style={{ position: "relative" }}>
-              <SetCard set={s} />
-              {confirmDelete === s.id ? (
-                <div style={{ display: "flex", gap: 6, marginTop: -8, marginBottom: 8, justifyContent: "flex-end" }}>
-                  <button onClick={() => { deleteSet(realIdx); setConfirmDelete(null); }} style={{
-                    padding: "6px 14px", borderRadius: 6, border: "none",
-                    background: C.red, color: C.white, fontSize: 11, fontWeight: 600, cursor: "pointer",
-                  }}>Delete</button>
-                  <button onClick={() => setConfirmDelete(null)} style={{
-                    padding: "6px 14px", borderRadius: 6, border: "1px solid " + C.border,
-                    background: C.card, color: C.textDim, fontSize: 11, fontWeight: 600, cursor: "pointer",
-                  }}>Cancel</button>
-                </div>
-              ) : (
-                <button onClick={() => setConfirmDelete(s.id)} style={{
-                  position: "absolute", top: 10, right: 10, background: "none", border: "none",
-                  color: C.textMuted, cursor: "pointer", fontSize: 14, padding: 4,
-                }}>✕</button>
-              )}
-            </div>
-          );
-        })
+        <Fragment>
+          {filtered.map((s) => {
+            const realIdx = sets.indexOf(s);
+            return (
+              <div key={s.id} style={{ position: "relative" }}>
+                <SetCard set={s} />
+                {confirmDelete === s.id ? (
+                  <div style={{ display: "flex", gap: 6, marginTop: -8, marginBottom: 8, justifyContent: "flex-end" }}>
+                    <button onClick={() => { deleteSet(realIdx); setConfirmDelete(null); }} style={{
+                      padding: "6px 14px", borderRadius: 6, border: "none",
+                      background: C.red, color: C.white, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                    }}>Delete</button>
+                    <button onClick={() => setConfirmDelete(null)} style={{
+                      padding: "6px 14px", borderRadius: 6, border: "1px solid " + C.border,
+                      background: C.card, color: C.textDim, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                    }}>Cancel</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setConfirmDelete(s.id)} style={{
+                    position: "absolute", top: 10, right: 10, background: "none", border: "none",
+                    color: C.textMuted, cursor: "pointer", fontSize: 14, padding: 4,
+                  }}>✕</button>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Export Button */}
+          <button onClick={handleExport} style={{
+            width: "100%", padding: "14px", borderRadius: 10, border: "none",
+            background: exported ? C.green : "linear-gradient(135deg, #1a6b3c, #167a3c)",
+            color: C.white, fontSize: 14, fontWeight: 700, cursor: "pointer",
+            fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.3px",
+            marginTop: 8, transition: "all 0.2s",
+            boxShadow: "0 4px 16px rgba(46,204,113,0.2)",
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          }}>
+            <span style={{ fontSize: 16 }}>{exported ? "✓" : "↓"}</span>
+            {exported ? "Downloaded!" : "Export to Excel (.xlsx)"}
+          </button>
+          <div style={{ textAlign: "center", marginTop: 6, fontSize: 10, color: C.textMuted, fontFamily: "'JetBrains Mono', monospace" }}>
+            Exports {filtered.length} set{filtered.length !== 1 ? "s" : ""} {filterLift !== "All" || filterWeek !== "All" ? "(filtered)" : "(all)"} with e1RM summary
+          </div>
+        </Fragment>
       )}
     </div>
   );
